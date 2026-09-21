@@ -1,0 +1,14 @@
+# binaries
+/bin/
+/server
+/worker
+/client
+/bench
+*.test
+*.out
+*.prof
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/

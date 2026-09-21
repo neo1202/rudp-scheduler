@@ -79,12 +79,12 @@ const (
 
 // DefaultParams returns the default tunables.
 func DefaultParams() *Params {
-	return (&Params{}).withDefaults()
+	return (&Params{}).WithDefaults()
 }
 
-// withDefaults returns a copy of p with every zero field filled in. A nil
+// WithDefaults returns a copy of p with every zero field filled in. A nil
 // receiver yields the defaults.
-func (p *Params) withDefaults() *Params {
+func (p *Params) WithDefaults() *Params {
 	var q Params
 	if p != nil {
 		q = *p
@@ -106,13 +106,13 @@ func (p *Params) withDefaults() *Params {
 
 // Epoch returns the epoch length as a duration.
 func (p *Params) Epoch() time.Duration {
-	return time.Duration(p.withDefaults().EpochMs) * time.Millisecond
+	return time.Duration(p.WithDefaults().EpochMs) * time.Millisecond
 }
 
 // RegisterFlags binds the transport tunables to fs. OrderedDelivery is
 // intentionally not exposed; only the benchmark harness sets it.
 func (p *Params) RegisterFlags(fs *flag.FlagSet) {
-	d := p.withDefaults()
+	d := p.WithDefaults()
 	fs.IntVar(&p.EpochMs, "epoch-ms", d.EpochMs, "transport epoch length in milliseconds")
 	fs.IntVar(&p.EpochLimit, "epoch-limit", d.EpochLimit, "silent epochs before a connection is declared lost")
 	fs.IntVar(&p.Window, "window", d.Window, "max unacknowledged messages per connection (also the per-worker in-flight cap)")

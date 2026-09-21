@@ -20,7 +20,7 @@ type Client struct {
 // server answers with a ConnAck carrying the assigned connection ID, and gives
 // up with ErrConnectTimeout after EpochLimit epochs. p may be nil.
 func NewClient(hostport string, p *Params) (*Client, error) {
-	p = p.withDefaults()
+	p = p.WithDefaults()
 	raddr, err := net.ResolveUDPAddr("udp", hostport)
 	if err != nil {
 		return nil, err

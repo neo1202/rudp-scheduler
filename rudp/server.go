@@ -25,7 +25,7 @@ type Server struct {
 
 // NewServer listens on the given UDP port (0 picks a free one). p may be nil.
 func NewServer(port int, p *Params) (*Server, error) {
-	p = p.withDefaults()
+	p = p.WithDefaults()
 	sock, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, err

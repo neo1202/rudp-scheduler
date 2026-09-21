@@ -73,6 +73,11 @@ func Wrap(inner net.PacketConn, cfg Config) *Conn {
 // WriteTo queues b for (possibly unreliable) transmission. It reports success
 // even if the packet is later dropped, exactly like a real network would.
 func (c *Conn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	select {
+	case <-c.done: // writeCh is buffered, so check this first
+		return 0, net.ErrClosed
+	default:
+	}
 	p := outPacket{b: append([]byte(nil), b...), addr: addr}
 	select {
 	case c.writeCh <- p:

@@ -12,6 +12,7 @@ import (
 	"github.com/neo1202/rudp-scheduler/node"
 	"github.com/neo1202/rudp-scheduler/rudp"
 	"github.com/neo1202/rudp-scheduler/sched"
+	"github.com/neo1202/rudp-scheduler/transport"
 	"github.com/neo1202/rudp-scheduler/wire"
 	"github.com/neo1202/rudp-scheduler/workload"
 	"github.com/neo1202/rudp-scheduler/workload/hashsearch"
@@ -146,7 +147,7 @@ func startCluster(t *testing.T, p *sched.Params, network lossy.Config) *cluster 
 		t.Fatal(err)
 	}
 	c.srv, c.addr = srv, fmt.Sprintf("127.0.0.1:%d", srv.Port())
-	c.sch, err = sched.New(srv, hs, p)
+	c.sch, err = sched.New(transport.FromRUDP(srv), hs, p)
 	if err != nil {
 		t.Fatal(err)
 	}

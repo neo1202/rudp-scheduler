@@ -117,7 +117,7 @@ func TestBinariesUnderTenPercentLoss(t *testing.T) {
 	common := []string{"-drop", "0.10", "-epoch-limit", "25"}
 
 	serverLog := start(t, bins["server"], append([]string{"-port", "0", "-http", httpAddr, "-net-seed", "1"}, common...)...)
-	portRE := regexp.MustCompile(`listening on udp port (\d+)`)
+	portRE := regexp.MustCompile(`listening on \w+ port (\d+)`)
 	var addr string
 	sc := bufio.NewScanner(serverLog)
 	for sc.Scan() {

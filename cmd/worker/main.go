@@ -14,6 +14,7 @@ import (
 	"github.com/neo1202/rudp-scheduler/internal/lossy"
 	"github.com/neo1202/rudp-scheduler/node"
 	"github.com/neo1202/rudp-scheduler/rudp"
+	"github.com/neo1202/rudp-scheduler/transport"
 	"github.com/neo1202/rudp-scheduler/workload"
 	"github.com/neo1202/rudp-scheduler/workload/hashsearch"
 )
@@ -25,6 +26,7 @@ func main() {
 		costMs    = flag.Int("chunk-cost-ms", 0, "pad every chunk to at least this many milliseconds (models a slower machine)")
 		slowdown  = flag.Float64("slowdown", 1, "after -slow-after chunks, take this many times longer per chunk (models a straggler)")
 		slowAfter = flag.Int("slow-after", 0, "number of chunks computed at full speed before -slowdown applies")
+		proto     = flag.String("transport", "rudp", "rudp or tcp; must match the server")
 		once      = flag.Bool("once", false, "exit when the connection ends instead of reconnecting")
 	)
 	p.RegisterFlags(flag.CommandLine)
@@ -52,7 +54,7 @@ func main() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 
 	for {
-		c, err := rudp.NewClient(addr, &p)
+		c, err := transport.Dial(*proto, addr, &p)
 		if err != nil {
 			log.Printf("connect %s: %v", addr, err)
 		} else {

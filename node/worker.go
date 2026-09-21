@@ -5,7 +5,7 @@
 package node
 
 import (
-	"github.com/neo1202/rudp-scheduler/rudp"
+	"github.com/neo1202/rudp-scheduler/transport"
 	"github.com/neo1202/rudp-scheduler/wire"
 	"github.com/neo1202/rudp-scheduler/workload"
 )
@@ -16,7 +16,7 @@ import (
 // The worker keeps no memory of what it has done. If the transport delivers
 // the same Chunk twice it is computed and answered twice; the server
 // de-duplicates by TaskID.
-func RunWorker(c *rudp.Client, wl workload.Workload) error {
+func RunWorker(c transport.Client, wl workload.Workload) error {
 	c.Write(wire.Encode(wire.Join{}))
 	for {
 		data, err := c.Read()

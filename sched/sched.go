@@ -21,7 +21,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/neo1202/rudp-scheduler/rudp"
+	"github.com/neo1202/rudp-scheduler/transport"
 	"github.com/neo1202/rudp-scheduler/wire"
 	"github.com/neo1202/rudp-scheduler/workload"
 )
@@ -47,7 +47,7 @@ type jobSpec struct {
 // job is the aggregation state of one request. Only the aggregator touches it.
 type job struct {
 	spec       jobSpec
-	client     *rudp.ConnHandle // nil while no client is attached
+	client     transport.Conn // nil while no client is attached
 	remaining  uint32
 	acc        workload.Partial
 	started    time.Time
@@ -57,7 +57,7 @@ type job struct {
 
 // submitReq is a clientHandler asking the aggregator what to do with a Request.
 type submitReq struct {
-	h     *rudp.ConnHandle
+	h     transport.Conn
 	spec  jobSpec
 	reply chan<- submitReply
 }
@@ -71,7 +71,7 @@ type submitReply struct {
 
 // Scheduler wires the four kinds of goroutine together.
 type Scheduler struct {
-	srv    *rudp.Server
+	srv    transport.Server
 	wl     workload.Workload
 	p      *Params
 	window int
@@ -87,10 +87,11 @@ type Scheduler struct {
 	boot *recovered // state rebuilt from the log; handed to the aggregator at start
 }
 
-// New prepares a scheduler on top of srv. p may be nil. srv should have been
-// created from p.Transport so that both layers agree on the window. With
+// New prepares a scheduler on top of srv. p may be nil. The scheduler only
+// sees the transport.Server interface; for the reliable-UDP transport, srv
+// should have been created from p.Transport so both layers agree on the window. With
 // p.WALPath set, New replays the log; the jobs found there resume in Run.
-func New(srv *rudp.Server, wl workload.Workload, p *Params) (*Scheduler, error) {
+func New(srv transport.Server, wl workload.Workload, p *Params) (*Scheduler, error) {
 	p = p.withDefaults()
 	s := &Scheduler{
 		srv:          srv,
@@ -143,7 +144,7 @@ func (s *Scheduler) dispatcher() {
 	for {
 		h, payload, err := s.srv.Read() // blocks until any connection has something
 		if err != nil {
-			if errors.Is(err, rudp.ErrServerClosed) {
+			if h == nil || errors.Is(err, transport.ErrClosed) {
 				return
 			}
 			if w, ok := workers[h.ID()]; ok { // this connection is gone
@@ -186,7 +187,7 @@ func (s *Scheduler) dispatcher() {
 // exits. Sending the Result is the aggregator's job. If the job is already
 // known (the client reconnected, or the server restarted and recovered it)
 // there is nothing to split and the handler exits at once.
-func (s *Scheduler) clientHandler(h *rudp.ConnHandle, req wire.Request) {
+func (s *Scheduler) clientHandler(h transport.Conn, req wire.Request) {
 	n, size := split(req.Lo, req.Hi, s.p.ChunkSize)
 	spec := jobSpec{id: req.Job, lo: req.Lo, hi: req.Hi, size: size, n: n, msg: req.Msg}
 	reply := make(chan submitReply, 1)

@@ -15,6 +15,7 @@ import (
 	"github.com/neo1202/rudp-scheduler/internal/metrics"
 	"github.com/neo1202/rudp-scheduler/rudp"
 	"github.com/neo1202/rudp-scheduler/sched"
+	"github.com/neo1202/rudp-scheduler/transport"
 	"github.com/neo1202/rudp-scheduler/workload/hashsearch"
 )
 
@@ -24,6 +25,7 @@ func main() {
 		netw  lossy.Flags
 		port  = flag.Int("port", 7000, "UDP port to listen on (0 picks a free one)")
 		httpA = flag.String("http", ":9100", "address for /metrics and /debug/pprof (empty disables)")
+		proto = flag.String("transport", "rudp", "rudp (this repository's reliable UDP) or tcp (baseline for comparison)")
 	)
 	p.RegisterFlags(flag.CommandLine)
 	netw.Register(flag.CommandLine)
@@ -37,16 +39,32 @@ func main() {
 	p.AggStats = col.AggStats()
 	p.Transport.WrapSocket = netw.Wrapper()
 
-	srv, err := rudp.NewServer(*port, &p.Transport)
-	if err != nil {
-		log.Fatal(err)
+	var (
+		srv   transport.Server
+		bound int
+	)
+	switch *proto {
+	case "rudp":
+		u, err := rudp.NewServer(*port, &p.Transport)
+		if err != nil {
+			log.Fatal(err)
+		}
+		srv, bound = transport.FromRUDP(u), u.Port()
+	case "tcp":
+		t, err := transport.ListenTCP(*port)
+		if err != nil {
+			log.Fatal(err)
+		}
+		srv, bound = t, t.Port()
+	default:
+		log.Fatalf("unknown -transport %q", *proto)
 	}
 	s, err := sched.New(srv, hashsearch.Workload{}, &p)
 	if err != nil {
 		log.Fatal(err)
 	}
 	col.Start(s.QueueDepths)
-	log.Printf("listening on udp port %d (drop=%.2f dup=%.2f jitter=%dms wal=%q)", srv.Port(), netw.Drop, netw.Dup, netw.JitterMs, p.WALPath)
+	log.Printf("listening on %s port %d (drop=%.2f dup=%.2f jitter=%dms wal=%q)", *proto, bound, netw.Drop, netw.Dup, netw.JitterMs, p.WALPath)
 
 	if *httpA != "" {
 		mux := http.NewServeMux()

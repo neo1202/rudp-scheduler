@@ -3,7 +3,7 @@ package sched
 import (
 	"time"
 
-	"github.com/neo1202/rudp-scheduler/rudp"
+	"github.com/neo1202/rudp-scheduler/transport"
 	"github.com/neo1202/rudp-scheduler/wire"
 )
 
@@ -17,7 +17,7 @@ type entry struct {
 // worker is the server-side proxy of one remote worker. The channels are how
 // the dispatcher reaches it; everything else belongs to its workerLoop.
 type worker struct {
-	h        *rudp.ConnHandle
+	h        transport.Conn
 	resultCh chan wire.ChunkResult // dispatcher -> workerLoop, buffered
 	dead     chan struct{}         // closed by the dispatcher when the connection is lost
 
@@ -32,7 +32,7 @@ type worker struct {
 	lastAccount time.Time
 }
 
-func newWorker(h *rudp.ConnHandle, window int) *worker {
+func newWorker(h transport.Conn, window int) *worker {
 	now := time.Now()
 	return &worker{
 		h:           h,

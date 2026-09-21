@@ -16,6 +16,7 @@ import (
 	"github.com/neo1202/rudp-scheduler/internal/lossy"
 	"github.com/neo1202/rudp-scheduler/node"
 	"github.com/neo1202/rudp-scheduler/rudp"
+	"github.com/neo1202/rudp-scheduler/transport"
 	"github.com/neo1202/rudp-scheduler/wire"
 	"github.com/neo1202/rudp-scheduler/workload"
 )
@@ -25,6 +26,7 @@ func main() {
 		p       rudp.Params
 		netw    lossy.Flags
 		job     = flag.Uint64("job", 0, "job ID (0 picks a random one); reuse an ID to rejoin that job")
+		proto   = flag.String("transport", "rudp", "rudp or tcp; must match the server")
 		retries = flag.Int("retries", 0, "after a lost connection, reconnect and ask for the same job this many times")
 	)
 	p.RegisterFlags(flag.CommandLine)
@@ -58,7 +60,7 @@ func main() {
 	// The job ID makes resubmitting safe: the server joins us to the running
 	// job, or hands back the stored answer, instead of starting over.
 	for attempt := 0; ; attempt++ {
-		res, err := submit(addr, &p, *job, msg, lo, hi)
+		res, err := submit(*proto, addr, &p, *job, msg, lo, hi)
 		if err == nil {
 			fmt.Println("Result", res.Hash, res.Nonce)
 			return
@@ -72,8 +74,8 @@ func main() {
 	}
 }
 
-func submit(addr string, p *rudp.Params, job uint64, msg string, lo, hi uint64) (workload.Partial, error) {
-	c, err := rudp.NewClient(addr, p)
+func submit(proto, addr string, p *rudp.Params, job uint64, msg string, lo, hi uint64) (workload.Partial, error) {
+	c, err := transport.Dial(proto, addr, p)
 	if err != nil {
 		return workload.Partial{}, err
 	}

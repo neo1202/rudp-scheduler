@@ -3,7 +3,7 @@ package sched
 import (
 	"time"
 
-	"github.com/neo1202/rudp-scheduler/rudp"
+	"github.com/neo1202/rudp-scheduler/transport"
 	"github.com/neo1202/rudp-scheduler/wal"
 	"github.com/neo1202/rudp-scheduler/wire"
 	"github.com/neo1202/rudp-scheduler/workload"
@@ -63,7 +63,7 @@ func (s *Scheduler) aggregator(boot *recovered) {
 			stats.WALErrors++
 		}
 	}
-	reply := func(h *rudp.ConnHandle, id uint64, p workload.Partial) {
+	reply := func(h transport.Conn, id uint64, p workload.Partial) {
 		if h != nil {
 			h.Write(wire.Encode(wire.Result{Job: id, Hash: p.Hash, Nonce: p.Nonce}))
 		}

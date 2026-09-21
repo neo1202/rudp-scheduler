@@ -11,6 +11,7 @@ import (
 	"github.com/neo1202/rudp-scheduler/node"
 	"github.com/neo1202/rudp-scheduler/rudp"
 	"github.com/neo1202/rudp-scheduler/sched"
+	"github.com/neo1202/rudp-scheduler/transport"
 	"github.com/neo1202/rudp-scheduler/workload"
 	"github.com/neo1202/rudp-scheduler/workload/hashsearch"
 )
@@ -94,7 +95,7 @@ func startCluster(cfg config) *cluster {
 		log.Fatal(err)
 	}
 	c.srv, c.addr = srv, fmt.Sprintf("127.0.0.1:%d", srv.Port())
-	s, err := sched.New(srv, hashsearch.Workload{}, p)
+	s, err := sched.New(transport.FromRUDP(srv), hashsearch.Workload{}, p)
 	if err != nil {
 		log.Fatal(err)
 	}

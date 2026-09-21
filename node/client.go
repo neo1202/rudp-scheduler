@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/neo1202/rudp-scheduler/rudp"
+	"github.com/neo1202/rudp-scheduler/transport"
 	"github.com/neo1202/rudp-scheduler/wire"
 	"github.com/neo1202/rudp-scheduler/workload"
 )
@@ -26,7 +26,7 @@ func NewJobID() uint64 {
 // Submitting the same job ID again, on a new connection, is safe and is how a
 // client recovers from a lost connection or a restarted server: it joins the
 // job if it is still running, or gets the stored answer if it has finished.
-func Submit(c *rudp.Client, job uint64, msg string, lo, hi uint64) (workload.Partial, error) {
+func Submit(c transport.Client, job uint64, msg string, lo, hi uint64) (workload.Partial, error) {
 	if len(msg) > wire.MaxMsgLen {
 		return workload.Partial{}, fmt.Errorf("node: message is %d bytes, limit is %d", len(msg), wire.MaxMsgLen)
 	}

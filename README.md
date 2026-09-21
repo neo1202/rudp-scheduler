@@ -213,6 +213,22 @@ it. Chunks are 100 000 nonces (about 5 ms of SHA-256 on one core) unless noted.
 | What does hedging buy? (one of 4 workers turns 50x slower) | speculation on: job p50 692 ms / p99 756 ms for 0.7% extra chunks. Off: p50 3022 ms / p99 3475 ms |
 | How does loss hurt? (4 workers) | 0 / 5 / 10 / 20% loss: goodput 100% / 90% / 84% / 51% of loss-free, retransmit rate 0 / 11 / 23 / 57% |
 
+**Against TCP, on a kernel-impaired network.** The scheduler sits behind a
+`transport` interface with two implementations, so the same job can run over
+TCP. In [docs/benchmarks-netem.md](docs/benchmarks-netem.md) every container
+impairs its own packets with Linux `tc netem`, nothing simulated by this
+repository:
+
+| 4 workers, 1 ms delay | 0% loss | 5% loss | 10% loss |
+|---|---|---|---|
+| reliable UDP, job p50 / max | 533 / 538 ms | 595 / 605 ms | 635 / 745 ms |
+| TCP, job p50 / max | 533 / 534 ms | 670 / 1972 ms | 1132 / 1305 ms |
+
+No cost without loss, a much shorter tail with it, and the netem numbers match
+the simulator's within a few percent. The caveat that belongs next to this
+table: TCP backs off because it treats loss as congestion, and this transport
+has no congestion control, so part of the win is not being polite.
+
 One result argues against a default. With the default 10 000-nonce chunk, which
 costs only 0.5 ms on this CPU, 10% loss leaves workers about 25% busy: a lost
 packet parks one of the five window slots for a 20 to 40 ms retransmission
@@ -247,12 +263,14 @@ Chunks should cost at least a few milliseconds; the tables show both sizes.
 rudp/            reliable-UDP transport (imports nothing from the scheduler)
 sched/           dispatcher, clientHandler, workerLoop, aggregator
 workload/        the Workload interface, hashsearch, a pacing wrapper
+transport/       the interface the scheduler sees; rudp adapter and a TCP baseline
 wire/            application message codec
 wal/             write-ahead log: framed, checksummed, torn-tail tolerant
 node/            run loops for worker and client processes
 cmd/             server, worker, client, bench
 internal/lossy/  net.PacketConn wrapper: seeded drop, duplication, jitter
 internal/metrics collector goroutine and Prometheus rendering
+netem/           the same system on a kernel-impaired Docker network, rudp vs TCP
 e2e/             builds the binaries and runs them against each other
 docs/            architecture.md, wire-format.md, benchmarks.md
 ```

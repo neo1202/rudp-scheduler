@@ -1,0 +1,31 @@
+# The netem experiment: the same scheduler over reliable UDP and over TCP, with
+# loss and delay injected by the Linux kernel (tc netem) inside each container.
+# Driven by netem/run.sh; not meant to be started by hand.
+name: rudp-netem
+
+x-node: &node
+  build:
+    context: ..
+  image: rudp-scheduler:local
+  cap_add: [NET_ADMIN]
+  entrypoint: ["/usr/local/bin/netem-entry.sh"]
+  environment:
+    NETEM: ${NETEM:-}
+
+services:
+  server:
+    <<: *node
+    command: ["server", "-transport=${TRANSPORT:-rudp}", "-port=7000", "-http=", "-chunk-size=100000", "-epoch-limit=10"]
+
+  worker:
+    <<: *node
+    command: ["worker", "-transport=${TRANSPORT:-rudp}", "-epoch-limit=10", "server:7000"]
+    depends_on: [server]
+    deploy:
+      replicas: 4
+
+  bench:
+    <<: *node
+    profiles: [bench]
+    command: ["netbench", "-transport=${TRANSPORT:-rudp}", "-epoch-limit=10", "-jobs=${JOBS:-10}", "-label=${LABEL:-run}", "server:7000"]
+    depends_on: [server, worker]

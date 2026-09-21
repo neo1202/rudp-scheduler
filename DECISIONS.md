@@ -50,6 +50,12 @@ the design it was built from.
 - **A failed log write is counted (`sched_wal_errors_total`) and otherwise ignored.** Reason: the scheduler is correct without the log; a full disk should cost durability, not the running jobs.
 - **The server's read loop drops a packet whose source address is not the connection's peer.** Reason: connection IDs restart from 1 when the server does, so a straggling packet from before the restart could otherwise land on a new connection with the same ID.
 
+## Transport interface
+
+- **The scheduler depends on `transport.Server/Conn/Client`, three small interfaces, not on `rudp`.** Reason: it lets the same scheduler run over TCP as a measured baseline, and the contract (one `Read` for all peers, non-blocking `Write`, a `Done` channel, no ordering promised) documents exactly how little the scheduler asks of a network.
+- **The TCP baseline is written without locks too** (reader, queue and writer goroutines per connection). Reason: `Write` must never block for the scheduler's deadlock argument to hold, and TCP's socket write does block; the queue goroutine owns the backlog in between.
+- **The netem experiment impairs egress in every container rather than using one shaped router.** Reason: it is the same loss model as `internal/lossy` (independent per direction), which is what makes the two sets of numbers comparable.
+
 ## Observability
 
 - **Metrics are cumulative snapshots sent with non-blocking sends, not one event per increment.** Reason: a dropped snapshot is repaired by the next one, so the data path never waits for the metrics goroutine and counters still never go backwards. Series whose owner disappears without a final snapshot are retired after 5 s.

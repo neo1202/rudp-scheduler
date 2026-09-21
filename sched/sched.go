@@ -35,13 +35,38 @@ type Task struct {
 	Lo, Hi uint64
 }
 
+// jobSpec is what is needed to split a job into tasks, now or after a restart.
+type jobSpec struct {
+	id     uint64
+	lo, hi uint64
+	size   uint64 // chunk width
+	n      uint32 // number of tasks
+	msg    string
+}
+
 // job is the aggregation state of one request. Only the aggregator touches it.
 type job struct {
-	client    *rudp.ConnHandle
-	n         uint32 // number of tasks
-	remaining uint32
-	acc       workload.Partial
-	started   time.Time
+	spec       jobSpec
+	client     *rudp.ConnHandle // nil while no client is attached
+	remaining  uint32
+	acc        workload.Partial
+	started    time.Time
+	orphanedAt time.Time     // when the client was lost; zero while attached
+	cancel     chan struct{} // closed when the job is dropped, stops its feeder
+}
+
+// submitReq is a clientHandler asking the aggregator what to do with a Request.
+type submitReq struct {
+	h     *rudp.ConnHandle
+	spec  jobSpec
+	reply chan<- submitReply
+}
+
+// submitReply tells the clientHandler whether the job is new, in which case it
+// must feed the tasks into nq until cancel is closed.
+type submitReply struct {
+	feed   bool
+	cancel <-chan struct{}
 }
 
 // Scheduler wires the four kinds of goroutine together.
@@ -54,28 +79,37 @@ type Scheduler struct {
 	nq chan Task // tasks not handed out yet; a full nq blocks the splitter (backpressure)
 	pq chan Task // clones of stragglers and tasks handed back by lost workers; pulled first
 
-	newJobCh     chan *job             // clientHandler -> aggregator
+	submitCh     chan submitReq        // clientHandler -> aggregator
 	resultsCh    chan wire.ChunkResult // workerLoop -> aggregator
 	clientGoneCh chan int              // dispatcher -> aggregator
 	stop         chan struct{}         // closed by the dispatcher when the server is closed
+
+	boot *recovered // state rebuilt from the log; handed to the aggregator at start
 }
 
 // New prepares a scheduler on top of srv. p may be nil. srv should have been
-// created from p.Transport so that both layers agree on the window.
-func New(srv *rudp.Server, wl workload.Workload, p *Params) *Scheduler {
+// created from p.Transport so that both layers agree on the window. With
+// p.WALPath set, New replays the log; the jobs found there resume in Run.
+func New(srv *rudp.Server, wl workload.Workload, p *Params) (*Scheduler, error) {
 	p = p.withDefaults()
-	return &Scheduler{
+	s := &Scheduler{
 		srv:          srv,
 		wl:           wl,
 		p:            p,
 		window:       p.Transport.Window,
 		nq:           make(chan Task, p.NQCap),
 		pq:           make(chan Task, p.MaxWorkers*p.Transport.Window),
-		newJobCh:     make(chan *job),
+		submitCh:     make(chan submitReq),
 		resultsCh:    make(chan wire.ChunkResult),
 		clientGoneCh: make(chan int),
 		stop:         make(chan struct{}),
 	}
+	boot, err := s.recover()
+	if err != nil {
+		return nil, err
+	}
+	s.boot = boot
+	return s, nil
 }
 
 // QueueDepths reports how many tasks are waiting in the normal and the
@@ -86,7 +120,12 @@ func (s *Scheduler) QueueDepths() (nq, pq int) { return len(s.nq), len(s.pq) }
 // after the server has been closed, having told every other scheduler
 // goroutine to stop.
 func (s *Scheduler) Run() {
-	go s.aggregator()
+	boot := s.boot
+	s.boot = nil // from here on the state belongs to the aggregator
+	for _, f := range boot.feeds {
+		go s.feed(f.spec, f.skip, f.cancel) // resume what the log says was unfinished
+	}
+	go s.aggregator(boot)
 	s.dispatcher()
 }
 
@@ -142,28 +181,46 @@ func (s *Scheduler) dispatcher() {
 	}
 }
 
-// clientHandler registers the job with the aggregator first, so that results
-// can find it, then pushes every task into nq and exits. Sending the Result is
-// the aggregator's job. A full nq blocks here on purpose: that is the
-// backpressure that keeps a huge request from unfolding into memory.
+// clientHandler asks the aggregator about the request first, so that results
+// can find the job, and then, if the job is new, pushes every task into nq and
+// exits. Sending the Result is the aggregator's job. If the job is already
+// known (the client reconnected, or the server restarted and recovered it)
+// there is nothing to split and the handler exits at once.
 func (s *Scheduler) clientHandler(h *rudp.ConnHandle, req wire.Request) {
 	n, size := split(req.Lo, req.Hi, s.p.ChunkSize)
-	j := &job{client: h, n: n, remaining: n, acc: s.wl.Zero(), started: time.Now()}
+	spec := jobSpec{id: req.Job, lo: req.Lo, hi: req.Hi, size: size, n: n, msg: req.Msg}
+	reply := make(chan submitReply, 1)
 	select {
-	case s.newJobCh <- j:
+	case s.submitCh <- submitReq{h: h, spec: spec, reply: reply}:
 	case <-s.stop:
 		return
 	}
-	for i := uint32(0); i < n; i++ {
-		lo := req.Lo + uint64(i)*size
-		hi := req.Hi
-		if hi-lo > size {
-			hi = lo + size
+	select {
+	case r := <-reply:
+		if r.feed {
+			s.feed(spec, nil, r.cancel)
 		}
-		t := Task{ID: wire.TaskID{Client: uint32(h.ID()), Idx: i}, Msg: req.Msg, Lo: lo, Hi: hi}
+	case <-s.stop:
+	}
+}
+
+// feed pushes a job's tasks into nq, skipping the ones in skip (already
+// counted before a restart). A full nq blocks here on purpose: that is the
+// backpressure that keeps a huge request from unfolding into memory.
+func (s *Scheduler) feed(spec jobSpec, skip map[uint32]bool, cancel <-chan struct{}) {
+	for i := uint32(0); i < spec.n; i++ {
+		if skip[i] {
+			continue
+		}
+		lo := spec.lo + uint64(i)*spec.size
+		hi := spec.hi
+		if hi-lo > spec.size {
+			hi = lo + spec.size
+		}
+		t := Task{ID: wire.TaskID{Job: spec.id, Idx: i}, Msg: spec.msg, Lo: lo, Hi: hi}
 		select {
 		case s.nq <- t:
-		case <-h.Done(): // client left: no point queueing the rest
+		case <-cancel: // job dropped: no point queueing the rest
 			return
 		case <-s.stop:
 			return

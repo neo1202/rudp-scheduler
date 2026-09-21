@@ -12,13 +12,13 @@ import (
 func TestRoundTrip(t *testing.T) {
 	msgs := []Message{
 		Join{},
-		Request{Lo: 0, Hi: math.MaxUint64, Msg: ""},
-		Request{Lo: 17, Hi: 99, Msg: "hello world"},
+		Request{Job: math.MaxUint64, Lo: 0, Hi: math.MaxUint64, Msg: ""},
+		Request{Job: 5, Lo: 17, Hi: 99, Msg: "hello world"},
 		Request{Lo: 1, Hi: 2, Msg: strings.Repeat("x", MaxMsgLen)},
-		Chunk{ID: TaskID{Client: 7, Idx: 3}, Lo: 10000, Hi: 20000, Msg: "héllo"},
-		Chunk{ID: TaskID{Client: math.MaxUint32, Idx: math.MaxUint32}, Lo: 1, Hi: 2, Msg: strings.Repeat("y", MaxMsgLen)},
-		ChunkResult{ID: TaskID{Client: 7, Idx: 3}, Hash: 0xDEADBEEFCAFEF00D, Nonce: 12345},
-		Result{Hash: 1, Nonce: math.MaxUint64},
+		Chunk{ID: TaskID{Job: 7, Idx: 3}, Lo: 10000, Hi: 20000, Msg: "héllo"},
+		Chunk{ID: TaskID{Job: math.MaxUint64, Idx: math.MaxUint32}, Lo: 1, Hi: 2, Msg: strings.Repeat("y", MaxMsgLen)},
+		ChunkResult{ID: TaskID{Job: 7, Idx: 3}, Hash: 0xDEADBEEFCAFEF00D, Nonce: 12345},
+		Result{Job: 9, Hash: 1, Nonce: math.MaxUint64},
 	}
 	for _, want := range msgs {
 		got, err := Decode(Encode(want))
@@ -38,14 +38,14 @@ func TestLayouts(t *testing.T) {
 		want []byte
 	}{
 		{Join{}, []byte{1}},
-		{Request{Lo: 1, Hi: 2, Msg: "ab"},
-			[]byte{2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 'a', 'b'}},
-		{Chunk{ID: TaskID{Client: 0x01020304, Idx: 5}, Lo: 1, Hi: 2, Msg: "z"},
-			[]byte{3, 1, 2, 3, 4, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 'z'}},
-		{ChunkResult{ID: TaskID{Client: 1, Idx: 2}, Hash: 3, Nonce: 4},
-			[]byte{4, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4}},
-		{Result{Hash: 0x0102030405060708, Nonce: 9},
-			[]byte{5, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 9}},
+		{Request{Job: 0x0102030405060708, Lo: 1, Hi: 2, Msg: "ab"},
+			[]byte{2, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 'a', 'b'}},
+		{Chunk{ID: TaskID{Job: 0x0102030405060708, Idx: 5}, Lo: 1, Hi: 2, Msg: "z"},
+			[]byte{3, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 1, 'z'}},
+		{ChunkResult{ID: TaskID{Job: 1, Idx: 2}, Hash: 3, Nonce: 4},
+			[]byte{4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 4}},
+		{Result{Job: 7, Hash: 0x0102030405060708, Nonce: 9},
+			[]byte{5, 0, 0, 0, 0, 0, 0, 0, 7, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 9}},
 	}
 	for _, c := range cases {
 		if got := Encode(c.m); !bytes.Equal(got, c.want) {
@@ -65,10 +65,10 @@ func TestLargestMessageFitsOneTransportPayload(t *testing.T) {
 func TestDecodeRejectsMalformed(t *testing.T) {
 	req := Encode(Request{Lo: 1, Hi: 2, Msg: "abc"})
 	lying := append([]byte(nil), req...)
-	lying[18] = 200 // msgLen claims more than is there
+	lying[26] = 200 // msgLen claims more than is there
 	tooLong := Encode(Request{Msg: strings.Repeat("x", MaxMsgLen)})
 	tooLong = append(tooLong, 'x')
-	tooLong[17], tooLong[18] = byte((MaxMsgLen+1)>>8), byte((MaxMsgLen+1)&0xFF)
+	tooLong[25], tooLong[26] = byte((MaxMsgLen+1)>>8), byte((MaxMsgLen+1)&0xFF)
 
 	cases := map[string][]byte{
 		"empty":                  {},
@@ -80,10 +80,10 @@ func TestDecodeRejectsMalformed(t *testing.T) {
 		"request header only":    req[:10],
 		"request lying length":   lying,
 		"request msg too long":   tooLong,
-		"chunk truncated":        Encode(Chunk{Msg: "abc"})[:26],
-		"chunkresult short":      Encode(ChunkResult{})[:24],
+		"chunk truncated":        Encode(Chunk{Msg: "abc"})[:30],
+		"chunkresult short":      Encode(ChunkResult{})[:28],
 		"chunkresult trailing":   append(Encode(ChunkResult{}), 0),
-		"result short":           Encode(Result{})[:16],
+		"result short":           Encode(Result{})[:24],
 		"result trailing":        append(Encode(Result{}), 0),
 		"result kind, join size": {5},
 	}

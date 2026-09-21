@@ -64,20 +64,22 @@ Every message starts with a one-byte `kind`.
 | Kind | Name | Direction | Layout after `kind` | Total size |
 |---|---|---|---|---|
 | `1` | Join | worker to server | nothing | 1 |
-| `2` | Request | client to server | `lo(8) hi(8) msgLen(2) msg` | 19 + msgLen |
-| `3` | Chunk | server to worker | `client(4) idx(4) lo(8) hi(8) msgLen(2) msg` | 27 + msgLen |
-| `4` | ChunkResult | worker to server | `client(4) idx(4) hash(8) nonce(8)` | 25 |
-| `5` | Result | server to client | `hash(8) nonce(8)` | 17 |
+| `2` | Request | client to server | `job(8) lo(8) hi(8) msgLen(2) msg` | 27 + msgLen |
+| `3` | Chunk | server to worker | `job(8) idx(4) lo(8) hi(8) msgLen(2) msg` | 31 + msgLen |
+| `4` | ChunkResult | worker to server | `job(8) idx(4) hash(8) nonce(8)` | 29 |
+| `5` | Result | server to client | `job(8) hash(8) nonce(8)` | 25 |
 
 - `lo`, `hi`: the half-open range `[lo, hi)` as unsigned 64-bit integers.
 - `msg`: the job's message string, raw bytes, `msgLen` at most 1024. The
-  largest message is therefore a Chunk of 1051 bytes, which fits one transport
+  largest message is therefore a Chunk of 1055 bytes, which fits one transport
   payload.
-- `client`, `idx`: together they form the **TaskID**. `client` is the
-  connection ID of the client that submitted the job; `idx` is the chunk's
-  index within that job, counted from 0. The TaskID is the idempotency key of
-  the whole system: it is how duplicated and speculatively re-executed chunks
-  are recognised.
+- `job`: a 64-bit job ID chosen by the client (at random, unless the user
+  supplies one). It is deliberately not derived from the connection: a job
+  keeps its identity when its client reconnects and when the server restarts.
+- `job`, `idx`: together they form the **TaskID**; `idx` is the chunk's index
+  within the job, counted from 0. The TaskID is the idempotency key of the
+  whole system: it is how duplicated, speculatively re-executed, and
+  recovered-then-recomputed chunks are recognised.
 - `hash`, `nonce`: a partial (ChunkResult) or final (Result) answer. For the
   default hash-search workload, `hash` is the first 8 bytes, big-endian, of
   `SHA-256(msg + " " + decimal(nonce))`, and the answer is the smallest `hash`
@@ -94,8 +96,8 @@ Rejected messages are ignored.
 worker                      server                       client
   | -- Join ------------------> |                            |
   |                             | <------ Request{msg,lo,hi} |
-  | <-- Chunk{client,idx,...} - |                            |
-  | -- ChunkResult{client,idx,  |                            |
+  | <-- Chunk{job,idx,...} ---- |                            |
+  | -- ChunkResult{job,idx,     |                            |
   |      hash,nonce} ---------> |                            |
   |            ...              |                            |
   |                             | ------ Result{hash,nonce}->|
@@ -107,3 +109,9 @@ transport may deliver any message twice, every receiver treats a repeated
 message as a no-op: a second Join or Request on a connection is ignored, a
 worker that sees the same Chunk again recomputes and resends it, and the
 server counts each TaskID once.
+
+A Request for a job ID the server already knows, arriving on a **new**
+connection, is how a client recovers: if the job is still running the
+connection is attached to it and will receive its Result; if the job has
+finished, the stored Result is sent at once. Nothing is computed twice on
+account of the second Request.

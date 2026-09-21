@@ -334,6 +334,15 @@ func WritePrometheus(w io.Writer, s Snapshot) {
 	fmt.Fprintf(w, "sched_jobs_total{outcome=\"completed\"} %d\n", s.Agg.JobsCompleted)
 	fmt.Fprintf(w, "sched_jobs_total{outcome=\"dropped\"} %d\n", s.Agg.JobsDropped)
 
+	metric("sched_jobs_recovered_total", "counter", "Running jobs rebuilt from the write-ahead log at start.")
+	fmt.Fprintf(w, "sched_jobs_recovered_total %d\n", s.Agg.JobsRecovered)
+	metric("sched_chunks_recovered_total", "counter", "Counted chunks rebuilt from the write-ahead log (work not redone).")
+	fmt.Fprintf(w, "sched_chunks_recovered_total %d\n", s.Agg.ChunksRecovered)
+	metric("sched_requests_reattached_total", "counter", "Requests that joined a running job or fetched a stored answer.")
+	fmt.Fprintf(w, "sched_requests_reattached_total %d\n", s.Agg.Reattached)
+	metric("sched_wal_errors_total", "counter", "Failed write-ahead log writes.")
+	fmt.Fprintf(w, "sched_wal_errors_total %d\n", s.Agg.WALErrors)
+
 	metric("sched_job_latency_seconds", "histogram", "Time from a job's registration to its Result.")
 	cumulative := uint64(0)
 	for i, bound := range sched.LatencyBounds {

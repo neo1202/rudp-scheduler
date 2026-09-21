@@ -94,7 +94,10 @@ func startCluster(cfg config) *cluster {
 		log.Fatal(err)
 	}
 	c.srv, c.addr = srv, fmt.Sprintf("127.0.0.1:%d", srv.Port())
-	s := sched.New(srv, hashsearch.Workload{}, p)
+	s, err := sched.New(srv, hashsearch.Workload{}, p)
+	if err != nil {
+		log.Fatal(err)
+	}
 	c.col.Start(s.QueueDepths)
 	go func() { s.Run(); close(c.runDone) }()
 
@@ -141,7 +144,7 @@ func (c *cluster) job(msg string, lo, hi uint64) (workload.Partial, time.Duratio
 	}
 	defer cl.Close()
 	start := time.Now()
-	res, err := node.Submit(cl, msg, lo, hi)
+	res, err := node.Submit(cl, node.NewJobID(), msg, lo, hi)
 	return res, time.Since(start), err
 }
 

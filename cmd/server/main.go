@@ -41,9 +41,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s := sched.New(srv, hashsearch.Workload{}, &p)
+	s, err := sched.New(srv, hashsearch.Workload{}, &p)
+	if err != nil {
+		log.Fatal(err)
+	}
 	col.Start(s.QueueDepths)
-	log.Printf("listening on udp port %d (drop=%.2f dup=%.2f jitter=%dms)", srv.Port(), netw.Drop, netw.Dup, netw.JitterMs)
+	log.Printf("listening on udp port %d (drop=%.2f dup=%.2f jitter=%dms wal=%q)", srv.Port(), netw.Drop, netw.Dup, netw.JitterMs, p.WALPath)
 
 	if *httpA != "" {
 		mux := http.NewServeMux()

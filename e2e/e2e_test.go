@@ -48,6 +48,12 @@ func freeTCPAddr(t *testing.T) string {
 // start runs a binary and terminates it gracefully when the test ends.
 func start(t *testing.T, bin string, args ...string) io.Reader {
 	t.Helper()
+	_, stderr := startCmd(t, bin, args...)
+	return stderr
+}
+
+func startCmd(t *testing.T, bin string, args ...string) (*exec.Cmd, io.Reader) {
+	t.Helper()
 	cmd := exec.Command(bin, args...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -57,6 +63,9 @@ func start(t *testing.T, bin string, args ...string) io.Reader {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		if cmd.ProcessState != nil {
+			return // already reaped by the test
+		}
 		cmd.Process.Signal(syscall.SIGTERM)
 		done := make(chan struct{})
 		go func() { cmd.Wait(); close(done) }()
@@ -67,7 +76,7 @@ func start(t *testing.T, bin string, args ...string) io.Reader {
 			t.Errorf("%s did not exit on SIGTERM", filepath.Base(bin))
 		}
 	})
-	return stderr
+	return cmd, stderr
 }
 
 func scrape(t *testing.T, addr string) string {
@@ -189,4 +198,86 @@ func TestClientPrintsDisconnected(t *testing.T) {
 	if got := strings.TrimSpace(string(out)); got != "Disconnected" {
 		t.Errorf("client printed %q, want %q", got, "Disconnected")
 	}
+}
+
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	return pc.LocalAddr().(*net.UDPAddr).Port
+}
+
+// kill -9 the server in the middle of a job and start a new one on the same
+// port and the same log. Workers reconnect on their own, the client asks
+// again with the same job ID, and the job finishes without redoing the chunks
+// the log remembers.
+func TestServerKilledAndRestarted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs binaries")
+	}
+	bins := build(t, t.TempDir(), "server", "worker", "client")
+	port, httpAddr := freeUDPPort(t), freeTCPAddr(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	walPath := filepath.Join(t.TempDir(), "jobs.wal")
+	serverArgs := []string{"-port", fmt.Sprint(port), "-http", httpAddr, "-wal", walPath, "-job-grace-ms", "20000"}
+
+	first, firstLog := startCmd(t, bins["server"], serverArgs...)
+	go io.Copy(io.Discard, firstLog)
+	for i := 0; i < 3; i++ {
+		go io.Copy(io.Discard, start(t, bins["worker"], "-chunk-cost-ms", "5", addr))
+	}
+
+	const msg, lo, hi, chunks = "kill -9", 0, 6_000_000, 600
+	client := exec.Command(bins["client"], "-job", "12345", "-retries", "40", addr, msg, fmt.Sprint(lo), fmt.Sprint(hi))
+	var out strings.Builder
+	client.Stdout = &out
+	if err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(20 * time.Second)
+	for merged := 0.0; merged < chunks/3; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("first server made no progress")
+		}
+		if resp, err := http.Get("http://" + httpAddr + "/metrics"); err == nil { // the HTTP listener may not be up yet
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			merged = metricValue(t, string(b), "sched_results_merged_total")
+		}
+	}
+	first.Process.Kill() // SIGKILL: no flush, no goodbye
+	first.Wait()
+
+	go io.Copy(io.Discard, start(t, bins["server"], serverArgs...))
+
+	done := make(chan error, 1)
+	go func() { done <- client.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("client: %v (stdout %q)", err, out.String())
+		}
+	case <-time.After(60 * time.Second):
+		client.Process.Kill()
+		t.Fatal("client never got its result after the restart")
+	}
+	want := hashsearch.Workload{}.Compute(msg, lo, hi)
+	if got, expect := strings.TrimSpace(out.String()), fmt.Sprintf("Result %d %d", want.Hash, want.Nonce); got != expect {
+		t.Errorf("client printed %q, want %q", got, expect)
+	}
+
+	text := scrape(t, httpAddr)
+	recovered := metricValue(t, text, "sched_chunks_recovered_total")
+	redone := metricValue(t, text, "sched_results_merged_total")
+	if metricValue(t, text, "sched_jobs_recovered_total") != 1 || recovered == 0 {
+		t.Errorf("second server recovered %v chunks; want the job and some chunks back from the log", recovered)
+	}
+	if recovered+redone != chunks {
+		t.Errorf("recovered %v + recomputed %v != %d chunks", recovered, redone, chunks)
+	}
+	t.Logf("after kill -9: %v chunks came back from the log, %v were recomputed", recovered, redone)
 }

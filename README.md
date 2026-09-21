@@ -110,6 +110,14 @@ else. The three algebraic properties of `Merge` are checked with
 - **End-to-end exactly-once.** The transport only promises at-least-once. The
   aggregator de-duplicates by `TaskID` and merges with an idempotent,
   order-free function. Every other receiver is idempotent as well.
+- **Survives `kill -9` of the server.** Jobs are named by a client-chosen ID,
+  not by a connection. With `-wal` the aggregator logs jobs and counted chunks;
+  a restarted server replays the log, queues only the chunks it does not
+  account for, workers reconnect, and the client re-asks with the same ID. The
+  log is synced in 50 ms groups rather than per record, because losing a
+  record only means recomputing a chunk, and that is safe for the same reason
+  duplicates are safe on the wire. An end-to-end test kills the real binary
+  mid-job and checks that recovered + recomputed chunks equal the job exactly.
 - **Single owner, zero locks.** Every piece of mutable state belongs to one
   goroutine; goroutines exchange values over channels. Non-test code does not
   import `sync` or `sync/atomic` at all, and CI greps to keep it that way. That
@@ -152,6 +160,9 @@ unreachable or goes away. Things to try while a job runs:
 
 - start another worker, or kill one with `kill -9`: the answer does not change;
 - start a straggler: `bin/worker -slowdown 50 -slow-after 20 localhost:7000`;
+- kill the server: run it as `bin/server -port 7000 -wal jobs.wal`, the client
+  with `-retries 40`, then `kill -9` the server mid-job and start it again.
+  Compare `sched_chunks_recovered_total` with `sched_results_merged_total`;
 - watch the scheduler work: `curl -s localhost:9100/metrics | grep -E 'sched_(speculations|tasks_requeued|results)'`;
 - profile it: `go tool pprof http://localhost:9100/debug/pprof/profile?seconds=10`.
 
@@ -179,8 +190,10 @@ an idle connection surviving on heartbeats and a vanished peer detected within
 `epochLimit` epochs; `Write` not blocking on a full window and `Close` flushing;
 exactly one merge per `TaskID` with 5 workers at 10% drop + 10% duplication;
 killing two workers and adding one mid-job; a worker turning 50x slower; a
-client vanishing mid-job with no goroutine left behind; and an end-to-end run
-of the real binaries at 10% loss.
+client vanishing mid-job with no goroutine left behind; a client reconnecting
+to its running job; a server restarted from a log with a torn final record; a
+log truncated at every byte offset; and end-to-end runs of the real binaries
+at 10% loss and through a `kill -9` of the server.
 
 ## Benchmarks
 
@@ -208,10 +221,11 @@ Chunks should cost at least a few milliseconds; the tables show both sizes.
 
 ## Known limitations
 
-- **The server is a single point of failure.** There is no replication and no
-  failover; if it dies, every job in progress is gone.
-- **Jobs are not persisted.** State lives in the server's memory. A client
-  whose connection is lost has to resubmit, and the work starts over.
+- **The server is a single point of failure for availability.** There is no
+  replication and no failover. With `-wal` a restarted server resumes its jobs,
+  but while it is down nothing progresses, and the log lives on one disk.
+- **Persistence is opt-in and local.** Without `-wal`, state lives in memory
+  and a restart loses every job in progress.
 - **No authentication and no encryption.** Anyone who can reach the port can
   join as a worker or submit jobs; packets are plaintext and connection IDs
   are guessable. A worker's answers are trusted, not verified.
@@ -234,6 +248,7 @@ rudp/            reliable-UDP transport (imports nothing from the scheduler)
 sched/           dispatcher, clientHandler, workerLoop, aggregator
 workload/        the Workload interface, hashsearch, a pacing wrapper
 wire/            application message codec
+wal/             write-ahead log: framed, checksummed, torn-tail tolerant
 node/            run loops for worker and client processes
 cmd/             server, worker, client, bench
 internal/lossy/  net.PacketConn wrapper: seeded drop, duplication, jitter

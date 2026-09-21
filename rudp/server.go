@@ -169,7 +169,10 @@ func (s *Server) readLoop() {
 			continue
 		}
 
-		if c, ok := conns[p.connID]; ok {
+		// The source must be the connection's peer. Connection IDs restart from 1
+		// when the server does, so a straggling packet from a previous run could
+		// otherwise land on a new connection that happens to reuse its ID.
+		if c, ok := conns[p.connID]; ok && sameAddr(addr, c.raddr) {
 			select {
 			case c.inCh <- p: // hand over to that connection's mainLoop
 			case <-c.dead: // it has ended: drop, never block
@@ -177,4 +180,14 @@ func (s *Server) readLoop() {
 			}
 		}
 	}
+}
+
+// sameAddr compares two peer addresses without allocating on the UDP path.
+func sameAddr(a, b net.Addr) bool {
+	ua, ok1 := a.(*net.UDPAddr)
+	ub, ok2 := b.(*net.UDPAddr)
+	if ok1 && ok2 {
+		return ua.Port == ub.Port && ua.IP.Equal(ub.IP)
+	}
+	return a.String() == b.String()
 }

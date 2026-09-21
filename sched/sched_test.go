@@ -43,15 +43,15 @@ type probe struct {
 	duplicates  int
 	orphans     int
 	maxInflight int
-	jobEnds     map[int]bool // client -> completed
-	backlogged  map[int]int  // transport conn -> worst pendingWrites depth
+	jobEnds     map[uint64]bool // job -> completed
+	backlogged  map[int]int     // transport conn -> worst pendingWrites depth
 }
 
 func newProbe() *probe {
 	return &probe{
 		merges:     map[wire.TaskID]int{},
 		speculated: map[string]int{},
-		jobEnds:    map[int]bool{},
+		jobEnds:    map[uint64]bool{},
 		backlogged: map[int]int{},
 	}
 }
@@ -68,7 +68,7 @@ func (pr *probe) hooks() *sched.Hooks {
 			})
 		},
 		OnSpeculate: func(w int, id wire.TaskID) {
-			pr.locked(func() { pr.speculated[fmt.Sprintf("%d/%d/%d", w, id.Client, id.Idx)]++ })
+			pr.locked(func() { pr.speculated[fmt.Sprintf("%d/%d/%d", w, id.Job, id.Idx)]++ })
 		},
 		OnMerge: func(id wire.TaskID) { pr.locked(func() { pr.merges[id]++ }) },
 		OnDiscard: func(_ wire.TaskID, dup bool) {
@@ -80,18 +80,17 @@ func (pr *probe) hooks() *sched.Hooks {
 				}
 			})
 		},
-		OnJobEnd: func(c int, completed bool) { pr.locked(func() { pr.jobEnds[c] = completed }) },
+		OnJobEnd: func(j uint64, completed bool) { pr.locked(func() { pr.jobEnds[j] = completed }) },
 	}
 }
 
-// assertExactlyOnce checks that every task of the client's job was merged
-// exactly once.
-func (pr *probe) assertExactlyOnce(t *testing.T, client, tasks int) {
+// assertExactlyOnce checks that every task of the job was merged exactly once.
+func (pr *probe) assertExactlyOnce(t *testing.T, job uint64, tasks int) {
 	t.Helper()
 	pr.locked(func() {
 		seen := 0
 		for id, n := range pr.merges {
-			if int(id.Client) != client {
+			if id.Job != job {
 				continue
 			}
 			seen++
@@ -100,7 +99,7 @@ func (pr *probe) assertExactlyOnce(t *testing.T, client, tasks int) {
 			}
 		}
 		if seen != tasks {
-			t.Errorf("client %d: %d distinct tasks merged, want %d", client, seen, tasks)
+			t.Errorf("job %d: %d distinct tasks merged, want %d", job, seen, tasks)
 		}
 	})
 }
@@ -123,8 +122,9 @@ type cluster struct {
 // while still detecting a killed peer within 300 ms.
 func testParams() *sched.Params {
 	return &sched.Params{
-		Transport: rudp.Params{EpochMs: 10, EpochLimit: 30},
-		ChunkSize: 500,
+		Transport:  rudp.Params{EpochMs: 10, EpochLimit: 30},
+		ChunkSize:  500,
+		JobGraceMs: 200,
 	}
 }
 
@@ -146,7 +146,10 @@ func startCluster(t *testing.T, p *sched.Params, network lossy.Config) *cluster 
 		t.Fatal(err)
 	}
 	c.srv, c.addr = srv, fmt.Sprintf("127.0.0.1:%d", srv.Port())
-	c.sch = sched.New(srv, hs, p)
+	c.sch, err = sched.New(srv, hs, p)
+	if err != nil {
+		t.Fatal(err)
+	}
 	go func() { c.sch.Run(); close(c.runDone) }()
 	return c
 }
@@ -189,7 +192,7 @@ func (c *cluster) addWorker(wl workload.Workload) *testWorker {
 }
 
 type outcome struct {
-	client int
+	job    uint64
 	result workload.Partial
 	err    error
 	took   time.Duration
@@ -198,6 +201,12 @@ type outcome struct {
 // submit runs one job on a fresh connection. kill, if non-nil, receives a
 // function that pulls the plug on this client once it is connected.
 func (c *cluster) submit(msg string, lo, hi uint64, kill chan<- func()) outcome {
+	c.t.Helper()
+	return c.submitAs(node.NewJobID(), msg, lo, hi, kill)
+}
+
+// submitAs is submit with a chosen job ID, for tests that ask twice.
+func (c *cluster) submitAs(job uint64, msg string, lo, hi uint64, kill chan<- func()) outcome {
 	c.t.Helper()
 	tp := c.p.Transport
 	var k func()
@@ -211,8 +220,8 @@ func (c *cluster) submit(msg string, lo, hi uint64, kill chan<- func()) outcome 
 		kill <- k
 	}
 	start := time.Now()
-	res, err := node.Submit(cl, msg, lo, hi)
-	return outcome{client: cl.ID(), result: res, err: err, took: time.Since(start)}
+	res, err := node.Submit(cl, job, msg, lo, hi)
+	return outcome{job: job, result: res, err: err, took: time.Since(start)}
 }
 
 func (c *cluster) close() {
@@ -265,7 +274,7 @@ func TestExactlyOnceUnderLossAndDuplication(t *testing.T) {
 	if want := hs.Compute("exactly once", 0, hi); got.result != want {
 		t.Errorf("result = %+v, want %+v (sequential)", got.result, want)
 	}
-	c.probe.assertExactlyOnce(t, got.client, tasks)
+	c.probe.assertExactlyOnce(t, got.job, tasks)
 	c.assertWindowRespected()
 	c.probe.locked(func() {
 		t.Logf("job took %v; aggregator discarded %d duplicate results", got.took, c.probe.duplicates)
@@ -305,7 +314,7 @@ func TestWorkersDieAndJoinMidJob(t *testing.T) {
 	if want := hs.Compute("churn", 0, hi); got.result != want {
 		t.Errorf("result = %+v, want %+v", got.result, want)
 	}
-	c.probe.assertExactlyOnce(t, got.client, tasks)
+	c.probe.assertExactlyOnce(t, got.job, tasks)
 	c.assertWindowRespected()
 
 	requeued := map[int]uint64{}
@@ -345,7 +354,7 @@ func TestStragglerDoesNotHoldTheJob(t *testing.T) {
 		if want := hs.Compute("straggler", 0, hi); got.result != want {
 			t.Errorf("noSpeculate=%v: result = %+v, want %+v", noSpeculate, got.result, want)
 		}
-		c.probe.assertExactlyOnce(t, got.client, tasks)
+		c.probe.assertExactlyOnce(t, got.job, tasks)
 		c.assertWindowRespected()
 		return got.took, c.probe
 	}
@@ -398,7 +407,7 @@ func TestClientVanishesMidJob(t *testing.T) {
 	waitFor(t, "the aggregator to drop the job", 5*time.Second, func() bool {
 		dropped := false
 		c.probe.locked(func() {
-			completed, ended := c.probe.jobEnds[got.client]
+			completed, ended := c.probe.jobEnds[got.job]
 			dropped = ended && !completed
 		})
 		return dropped
@@ -417,7 +426,7 @@ func TestClientVanishesMidJob(t *testing.T) {
 	if want := hs.Compute("survivor", 0, 20*c.p.ChunkSize); next.result != want {
 		t.Errorf("result after a client vanished = %+v, want %+v", next.result, want)
 	}
-	c.probe.assertExactlyOnce(t, next.client, 20)
+	c.probe.assertExactlyOnce(t, next.job, 20)
 	c.probe.locked(func() { t.Logf("orphan results discarded: %d", c.probe.orphans) })
 
 	c.close() // leakCheck now verifies that every goroutine is gone
@@ -484,7 +493,7 @@ func TestConcurrentClientsAndOddRanges(t *testing.T) {
 			if want := hs.Compute(tc.msg, tc.lo, tc.hi); got.result != want {
 				t.Errorf("%s: result = %+v, want %+v", tc.msg, got.result, want)
 			}
-			c.probe.assertExactlyOnce(t, got.client, tc.tasks)
+			c.probe.assertExactlyOnce(t, got.job, tc.tasks)
 		}()
 	}
 	wg.Wait()
@@ -513,15 +522,16 @@ func TestDuplicateJoinAndRequestAreIdempotent(t *testing.T) {
 	}
 	defer cl.Close()
 	const tasks = 10
-	cl.Write(wire.Encode(wire.Request{Lo: 0, Hi: tasks * 500, Msg: "twice"})) // Submit sends it again
-	got, err := node.Submit(cl, "twice", 0, tasks*500)
+	const job = 4242
+	cl.Write(wire.Encode(wire.Request{Job: job, Lo: 0, Hi: tasks * 500, Msg: "twice"})) // Submit sends it again
+	got, err := node.Submit(cl, job, "twice", 0, tasks*500)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := hs.Compute("twice", 0, tasks*500); got != want {
 		t.Errorf("result = %+v, want %+v", got, want)
 	}
-	c.probe.assertExactlyOnce(t, cl.ID(), tasks)
+	c.probe.assertExactlyOnce(t, job, tasks)
 	c.probe.locked(func() {
 		if n := len(c.probe.jobEnds); n != 1 {
 			t.Errorf("%d jobs ended, want 1", n)

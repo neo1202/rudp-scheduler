@@ -28,12 +28,14 @@ const MaxMsgLen = 1024
 // well-formed message.
 var ErrMalformed = errors.New("wire: malformed message")
 
-// TaskID names one chunk of one job: the client's connection ID and the
-// chunk's index within that client's request. It is the idempotency key of
-// the whole system.
+// TaskID names one chunk of one job: the job's ID and the chunk's index within
+// it. It is the idempotency key of the whole system.
+//
+// The job ID is chosen by the client, not derived from its connection, so a
+// job keeps its identity when the client reconnects or the server restarts.
 type TaskID struct {
-	Client uint32
-	Idx    uint32
+	Job uint64
+	Idx uint32
 }
 
 // Message is one of Join, Request, Chunk, ChunkResult, Result.
@@ -43,7 +45,10 @@ type Message interface{ kind() byte }
 type Join struct{}
 
 // Request asks for the best result over the range [Lo, Hi) of job Msg.
+// Sending the same Job again is harmless: it re-attaches to the running job,
+// or fetches the stored answer if the job has already finished.
 type Request struct {
+	Job    uint64
 	Lo, Hi uint64
 	Msg    string
 }
@@ -62,8 +67,9 @@ type ChunkResult struct {
 	Nonce uint64
 }
 
-// Result is the single answer to a Request.
+// Result is the answer to a Request.
 type Result struct {
+	Job   uint64
 	Hash  uint64
 	Nonce uint64
 }
@@ -82,34 +88,36 @@ func Encode(m Message) []byte {
 	case Join:
 		return []byte{KindJoin}
 	case Request:
-		b := make([]byte, 19, 19+len(m.Msg))
-		b[0] = KindRequest
-		be.PutUint64(b[1:], m.Lo)
-		be.PutUint64(b[9:], m.Hi)
-		be.PutUint16(b[17:], msgLen(m.Msg))
-		return append(b, m.Msg...)
-	case Chunk:
 		b := make([]byte, 27, 27+len(m.Msg))
-		b[0] = KindChunk
-		be.PutUint32(b[1:], m.ID.Client)
-		be.PutUint32(b[5:], m.ID.Idx)
+		b[0] = KindRequest
+		be.PutUint64(b[1:], m.Job)
 		be.PutUint64(b[9:], m.Lo)
 		be.PutUint64(b[17:], m.Hi)
 		be.PutUint16(b[25:], msgLen(m.Msg))
 		return append(b, m.Msg...)
+	case Chunk:
+		b := make([]byte, 31, 31+len(m.Msg))
+		b[0] = KindChunk
+		be.PutUint64(b[1:], m.ID.Job)
+		be.PutUint32(b[9:], m.ID.Idx)
+		be.PutUint64(b[13:], m.Lo)
+		be.PutUint64(b[21:], m.Hi)
+		be.PutUint16(b[29:], msgLen(m.Msg))
+		return append(b, m.Msg...)
 	case ChunkResult:
-		b := make([]byte, 25)
+		b := make([]byte, 29)
 		b[0] = KindChunkResult
-		be.PutUint32(b[1:], m.ID.Client)
-		be.PutUint32(b[5:], m.ID.Idx)
-		be.PutUint64(b[9:], m.Hash)
-		be.PutUint64(b[17:], m.Nonce)
+		be.PutUint64(b[1:], m.ID.Job)
+		be.PutUint32(b[9:], m.ID.Idx)
+		be.PutUint64(b[13:], m.Hash)
+		be.PutUint64(b[21:], m.Nonce)
 		return b
 	case Result:
-		b := make([]byte, 17)
+		b := make([]byte, 25)
 		b[0] = KindResult
-		be.PutUint64(b[1:], m.Hash)
-		be.PutUint64(b[9:], m.Nonce)
+		be.PutUint64(b[1:], m.Job)
+		be.PutUint64(b[9:], m.Hash)
+		be.PutUint64(b[17:], m.Nonce)
 		return b
 	}
 	panic("wire: unknown message type")
@@ -136,26 +144,26 @@ func Decode(b []byte) (Message, error) {
 			return Join{}, nil
 		}
 	case KindRequest:
-		if s, ok := tail(b, 17); ok {
-			return Request{Lo: be.Uint64(b[1:]), Hi: be.Uint64(b[9:]), Msg: s}, nil
+		if s, ok := tail(b, 25); ok {
+			return Request{Job: be.Uint64(b[1:]), Lo: be.Uint64(b[9:]), Hi: be.Uint64(b[17:]), Msg: s}, nil
 		}
 	case KindChunk:
-		if s, ok := tail(b, 25); ok {
+		if s, ok := tail(b, 29); ok {
 			return Chunk{
-				ID: TaskID{Client: be.Uint32(b[1:]), Idx: be.Uint32(b[5:])},
-				Lo: be.Uint64(b[9:]), Hi: be.Uint64(b[17:]), Msg: s,
+				ID: TaskID{Job: be.Uint64(b[1:]), Idx: be.Uint32(b[9:])},
+				Lo: be.Uint64(b[13:]), Hi: be.Uint64(b[21:]), Msg: s,
 			}, nil
 		}
 	case KindChunkResult:
-		if len(b) == 25 {
+		if len(b) == 29 {
 			return ChunkResult{
-				ID:   TaskID{Client: be.Uint32(b[1:]), Idx: be.Uint32(b[5:])},
-				Hash: be.Uint64(b[9:]), Nonce: be.Uint64(b[17:]),
+				ID:   TaskID{Job: be.Uint64(b[1:]), Idx: be.Uint32(b[9:])},
+				Hash: be.Uint64(b[13:]), Nonce: be.Uint64(b[21:]),
 			}, nil
 		}
 	case KindResult:
-		if len(b) == 17 {
-			return Result{Hash: be.Uint64(b[1:]), Nonce: be.Uint64(b[9:])}, nil
+		if len(b) == 25 {
+			return Result{Job: be.Uint64(b[1:]), Hash: be.Uint64(b[9:]), Nonce: be.Uint64(b[17:])}, nil
 		}
 	}
 	return nil, ErrMalformed

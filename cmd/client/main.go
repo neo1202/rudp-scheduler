@@ -11,17 +11,21 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/neo1202/rudp-scheduler/internal/lossy"
 	"github.com/neo1202/rudp-scheduler/node"
 	"github.com/neo1202/rudp-scheduler/rudp"
 	"github.com/neo1202/rudp-scheduler/wire"
+	"github.com/neo1202/rudp-scheduler/workload"
 )
 
 func main() {
 	var (
-		p    rudp.Params
-		netw lossy.Flags
+		p       rudp.Params
+		netw    lossy.Flags
+		job     = flag.Uint64("job", 0, "job ID (0 picks a random one); reuse an ID to rejoin that job")
+		retries = flag.Int("retries", 0, "after a lost connection, reconnect and ask for the same job this many times")
 	)
 	p.RegisterFlags(flag.CommandLine)
 	netw.Register(flag.CommandLine)
@@ -47,18 +51,32 @@ func main() {
 	}
 	p.WrapSocket = netw.Wrapper()
 
-	c, err := rudp.NewClient(addr, &p)
+	if *job == 0 {
+		*job = node.NewJobID()
+	}
+
+	// The job ID makes resubmitting safe: the server joins us to the running
+	// job, or hands back the stored answer, instead of starting over.
+	for attempt := 0; ; attempt++ {
+		res, err := submit(addr, &p, *job, msg, lo, hi)
+		if err == nil {
+			fmt.Println("Result", res.Hash, res.Nonce)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "client: job %d: %v\n", *job, err)
+		if attempt >= *retries {
+			fmt.Println("Disconnected")
+			os.Exit(1)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func submit(addr string, p *rudp.Params, job uint64, msg string, lo, hi uint64) (workload.Partial, error) {
+	c, err := rudp.NewClient(addr, p)
 	if err != nil {
-		fmt.Println("Disconnected")
-		os.Exit(1)
+		return workload.Partial{}, err
 	}
 	defer c.Close()
-	res, err := node.Submit(c, msg, lo, hi)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "client:", err)
-		fmt.Println("Disconnected")
-		c.Close()
-		os.Exit(1)
-	}
-	fmt.Println("Result", res.Hash, res.Nonce)
+	return node.Submit(c, job, msg, lo, hi)
 }

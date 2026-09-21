@@ -10,6 +10,7 @@ breaking the properties it relies on.
 - [Scheduling layer](#scheduling-layer)
 - [End-to-end exactly-once](#end-to-end-exactly-once)
 - [Failure handling](#failure-handling)
+- [Surviving a server restart](#surviving-a-server-restart)
 - [Concurrency discipline](#concurrency-discipline)
 - [Invariants](#invariants)
 - [Parameters](#parameters)
@@ -186,9 +187,9 @@ Four kinds of goroutine, all on the server.
 | Goroutine | Count | Blocks on | Owns |
 |---|---|---|---|
 | `dispatcher` | 1 | `srv.Read()` | the worker and client tables |
-| `clientHandler` | 1 per request, short-lived | `nq` when it is full | nothing |
+| `clientHandler` | 1 per request, short-lived | `nq` when it is full | nothing. Asks the aggregator whether the job ID is new; only then splits and feeds `nq` |
 | `workerLoop` | 1 per worker | its `select` | that worker's `inflight` map and task-level SRTT |
-| `aggregator` | 1 | its `select` | `done` and `jobs` |
+| `aggregator` | 1 | its `select` | `done`, `jobs`, stored answers, the write-ahead log |
 
 Total on a server with C clients and M workers:
 `(1 + C + M + 1) + (1 + C + M)`; with 3 clients and 5 workers that is 19.
@@ -272,7 +273,7 @@ sequenceDiagram
     participant S as workerLoop S (degraded)
     participant G as aggregator
     C->>H: Request{msg, lo, hi}
-    H->>G: newJobCh <- job(100 tasks)
+    H->>G: submitCh <- job(100 tasks), reply: new
     H->>H: push 100 tasks into nq, exit
     A->>A: <-nq x5, send Chunks
     S->>S: <-nq x5, send Chunks
@@ -293,9 +294,10 @@ Neither layer provides exactly-once on its own. Together they do.
   the workload's `Merge`, which must be commutative, associative and
   idempotent.
 
-Repetition has three sources: the transport re-delivering a message whose Ack
-was lost, a speculative clone finishing alongside its original, and a task
-being recomputed after its worker died. All three produce a second result for
+Repetition has four sources: the transport re-delivering a message whose Ack
+was lost, a speculative clone finishing alongside its original, a task being
+recomputed after its worker died, and a task being recomputed after a server
+restart because its log record had not reached the disk. All four produce a second result for
 a `TaskID` that `done` already contains, and it is dropped. Reordering is
 harmless because `Merge` is commutative and associative. So each chunk is
 counted exactly once, independent of arrival order and of how many times it
@@ -324,11 +326,52 @@ Every failure folds into a mechanism that already exists.
 | A worker vanishes | Its connection goes silent for `epochLimit` epochs and `srv.Read()` reports it. The dispatcher closes that worker's `dead` channel and forgets it. The `workerLoop` pushes every in-flight task into `pq` and exits. Tasks that had in fact finished get recomputed; the aggregator drops the second result. |
 | A worker joins | The dispatcher starts a `workerLoop`, which immediately pulls. Nothing is rebalanced. |
 | A worker slows down | Its own ticker clones its overdue tasks into `pq`. The original stays where it is; whichever result reaches the aggregator first counts. |
-| A client vanishes | The dispatcher tells the aggregator, which deletes the job and its `done` entries. The `clientHandler`, if still splitting, stops. Results that arrive later find no job and are dropped. |
-| The server dies | Everything is lost. See Known limitations in the README. |
+| A client vanishes | The dispatcher tells the aggregator, which detaches the client and starts a grace period (`jobGraceMs`). If the client reconnects and sends the same job ID it is attached again and nothing was lost; this also covers a client that was only *declared* lost after a run of dropped heartbeats. Otherwise the job and its `done` entries are deleted, its feeder stops, and results that arrive later find no job and are dropped. |
+| The server dies | With `-wal` set, a restarted server rebuilds its jobs from the log and carries on; see the next section. Without it, everything is lost. |
 
 A straggler and a dead worker end in the same action, "put the task in `pq`".
 The only difference is whether the original copy still exists.
+
+## Surviving a server restart
+
+Jobs are identified by a 64-bit ID that the client chooses, not by the
+client's connection, so a job still means something after the connection, or
+the server process, is gone. With `-wal <file>` the aggregator appends four
+kinds of record to a write-ahead log (`wal/`): `JobStart` (the request and the
+chunk width actually used), `ChunkDone` (one counted result), `JobDone` (the
+answer) and `JobDrop`. The log has one owner, the aggregator, like everything
+else.
+
+On start, `sched.New` replays the log with the same fold the aggregator runs
+live: de-duplicate by TaskID, `Merge`, count down. Unfinished jobs get a
+feeder that queues only the chunks the log does not already account for.
+Workers reconnect on their own, and the client resubmits its job ID and is
+attached to the recovered job. The replayed log is then rewritten as the
+shortest history that yields the same state.
+
+**Durability is an optimisation here, not a correctness requirement**, and
+that is the same argument that lets the transport skip de-duplication, pushed
+one layer further down:
+
+- A `ChunkDone` lost in a crash means that chunk is computed and merged again.
+  `Compute` is deterministic and `Merge` is idempotent, so the answer is the
+  same. Chunk records are therefore buffered and synced every 50 ms, not per
+  record; a crash costs at most 50 ms of recomputation.
+- A `JobStart` lost in a crash is repaired by the client, which still holds
+  the request and resubmits it.
+- A Result sent just before a crash that lost its `JobDone` is recomputed from
+  the surviving chunk records to the same value.
+
+`JobStart` and `JobDone` are synced immediately anyway, because they are rare
+and save the most work. Every record is framed with its length and a CRC-32;
+replay stops at the first frame that is truncated or fails its checksum, which
+is what a crash in the middle of a write leaves behind, and the file is cut
+there. A test truncates a log at every byte offset and checks that replay
+always yields a prefix.
+
+What this does not give: availability. There is still one server; while it is
+down nothing progresses. The log makes a restart cheap, it does not remove the
+need for one.
 
 ## Concurrency discipline
 
@@ -341,7 +384,7 @@ over a channel, or lock it. This code base uses only the first two.
 | connection table, address table | the server's `readLoop` |
 | worker table, client table | `dispatcher` |
 | `inflight`, task-level SRTT | that worker's `workerLoop` |
-| `done`, `jobs` | `aggregator` |
+| `done`, `jobs`, stored answers, the write-ahead log | `aggregator` |
 | every metric series | the metrics collector goroutine |
 | RNG and delay heap of a simulated network | that `lossy.Conn`'s goroutine |
 
@@ -404,6 +447,9 @@ command-line flag.
 | `tickMs` | 10 | workerLoop | slower straggler detection |
 | `nqCap` | 4096 | scheduler | the splitter blocks later, more memory per large request |
 | `maxWorkers` | 64 | scheduler | sizes `pq` as `maxWorkers x window`; "big enough" is all that matters |
+| `wal` | off | aggregator | path of the write-ahead log; jobs survive a restart when set |
+| `jobGraceMs` | 5000 | aggregator | a job waits longer for a lost client to come back; more work wasted on clients that never do |
+| `resultTtlMs` | 60000 | aggregator | finished answers are kept longer for clients that ask again; more memory |
 
 ## Observability
 
@@ -427,4 +473,5 @@ the data path never waits for metrics.
 | `sched_worker_inflight{worker}`, `sched_worker_utilization{worker}`, `sched_worker_task_srtt_seconds{worker}` | per-worker load and pace |
 | `sched_speculations_total`, `sched_tasks_requeued_total` | hedging and recovery activity |
 | `sched_results_merged_total`, `sched_results_duplicate_total`, `sched_results_orphan_total`, `sched_worker_duplicate_results_total` | the exactly-once bookkeeping, visible |
+| `sched_jobs_recovered_total`, `sched_chunks_recovered_total`, `sched_requests_reattached_total`, `sched_wal_errors_total` | what a restart saved, and whether the log is healthy |
 | `sched_job_latency_seconds` | histogram, registration to Result |

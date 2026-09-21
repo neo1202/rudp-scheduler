@@ -29,15 +29,26 @@ the design it was built from.
 ## Scheduler
 
 - **A worker that pulls its own clone from `pq` puts it back and ignores `pq` until its next tick.** Reason: recording it would overwrite the in-flight entry, reset its age and send the same chunk to the same slow worker. If `pq` is full the clone is dropped; the original is still in flight, so the task is not lost and the entry stays marked as speculated (invariant 2).
-- **`clientHandler` stops queueing when the client's connection ends, and the aggregator refuses a job whose client is already gone.** Reason: without the first, a vanished client still costs a full job of wasted work; without the second, a job registered after the dispatcher's "client gone" notice would never be cleaned up. `ConnHandle.Done()` was added to the transport API for this.
+- **A job's feeder stops when the aggregator drops the job (a per-job `cancel` channel), and a Request whose client has already vanished still registers the job, as orphaned.** Reason: without the first, an abandoned job still costs a full job of wasted work; the second closes the race where the dispatcher's "client gone" notice overtakes the clientHandler, so the grace period always starts. `ConnHandle.Done()` was added to the transport API for this check.
 - **A connection's first message fixes its role.** A Join on a client connection or a Request on a worker connection is ignored. Reason: repeated messages must be no-ops, and mixed roles have no meaning.
-- **One request per client connection.** Reason: `TaskID = {client connection, chunk index}`; a second request on the same connection would reuse task IDs.
+- **One request per client connection.** Reason: it keeps "which job is this connection waiting for" a single value; a client that wants several jobs opens several connections.
 - **Jobs are capped at 2^20 tasks; larger ranges get proportionally larger chunks.** Reason: bounds the aggregator's `done` map and keeps the chunk index inside 32 bits.
 - **An empty or inverted range is answered at once with `Zero()`.** Reason: a job with zero tasks would otherwise never complete.
 - **The aggregator checks that a result's chunk index is inside the job.** Reason: a faulty worker must not be able to make `remaining` reach zero early.
 - **`MaxWorkers` (default 64) only sizes `pq`; it is not an admission limit.** Reason: a full `pq` delays a clone by one tick and never affects correctness.
 - **`Partial` is a fixed pair of `uint64` (`Hash`, `Nonce`), and `Zero()` for hash search is `{MaxUint64, MaxUint64}`.** Reason: the wire format stays fixed-size, and that value is the identity of a lexicographic minimum. Workloads with richer partial results would need a wire-format revision.
 - **Job messages are limited to 1024 bytes.** Reason: the largest message, a Chunk, must fit one 1200-byte transport payload.
+
+## Durability
+
+- **`TaskID` is `{job ID, chunk index}` with a client-chosen 64-bit job ID, not `{client connection, chunk index}` as first designed; Request, Chunk, ChunkResult and Result carry the job ID.** Reason: a connection-derived ID dies with the connection, so neither a reconnecting client nor a restarted server could say which job they meant. This is a wire-format change.
+- **A client losing its connection no longer drops the job at once; the job waits `jobGraceMs` (5 s) for the same job ID to come back.** Reason: reattachment is what makes a restart survivable, and it also rescues a client that was only declared lost by a run of dropped heartbeats. Cost: up to 5 s of work for a client that is really gone.
+- **The log is synced in groups (every 50 ms), and only `JobStart` and `JobDone` are synced immediately.** Reason: a lost `ChunkDone` costs one recomputed chunk and cannot change the answer, because `Compute` is deterministic and `Merge` idempotent. Correctness never depends on a record having reached the disk.
+- **The clientHandler asks the aggregator before splitting** (`submitCh`, with a reply) instead of announcing a new job. Reason: only the aggregator knows whether a job ID is new, running, or already answered, and only a new job needs a feeder.
+- **Finished answers are kept for `resultTtlMs` (60 s) and logged.** Reason: a client whose Result was lost with its connection must be able to ask again without the job being recomputed.
+- **Log compaction happens at start and when the scheduler is idle, never mid-job.** Reason: `done` holds only TaskIDs, not the partial results a running job's `ChunkDone` records would have to repeat; compacting when nothing is running needs no extra state.
+- **A failed log write is counted (`sched_wal_errors_total`) and otherwise ignored.** Reason: the scheduler is correct without the log; a full disk should cost durability, not the running jobs.
+- **The server's read loop drops a packet whose source address is not the connection's peer.** Reason: connection IDs restart from 1 when the server does, so a straggling packet from before the restart could otherwise land on a new connection with the same ID.
 
 ## Observability
 

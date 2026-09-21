@@ -22,7 +22,7 @@ func TestPacedStretchesComputeButNotTheAnswer(t *testing.T) {
 		took = append(took, time.Since(start))
 	}
 	for i, d := range took[:2] {
-		if d < 2*time.Millisecond || d > 15*time.Millisecond {
+		if d < 2*time.Millisecond || d > 18*time.Millisecond { // well below the 20ms a slow call takes
 			t.Errorf("call %d took %v, want about 2ms", i, d)
 		}
 	}

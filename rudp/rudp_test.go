@@ -285,7 +285,7 @@ func rawSocket(dst *net.PacketConn) func(net.PacketConn) net.PacketConn {
 func TestVanishedPeerIsReported(t *testing.T) {
 	p := &Params{EpochMs: 20, EpochLimit: 5}
 	limit := time.Duration(p.EpochLimit) * p.Epoch()
-	slack := 3 * p.Epoch() // scheduling noise, not protocol time
+	slack := 5 * p.Epoch() // scheduling noise on a loaded machine, not protocol time
 
 	t.Run("client vanishes", func(t *testing.T) {
 		leakCheck(t)

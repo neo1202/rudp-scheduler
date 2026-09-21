@@ -1,0 +1,34 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test -race ./...
+
+      # The whole design rests on "one owner per piece of state, channels in
+      # between". Locks and atomics are allowed in tests only.
+      - name: no locks outside tests
+        run: |
+          if grep -rnE 'sync\.(Mutex|RWMutex|Map)|sync/atomic' --include='*.go' --exclude='*_test.go' .; then
+            echo "::error::locks or atomics found in non-test code"
+            exit 1
+          fi

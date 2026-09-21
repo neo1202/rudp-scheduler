@@ -1,0 +1,54 @@
+# 1 server + 4 workers + 1 client on a private network, with simulated packet
+# loss on every socket.
+#
+#   docker compose up --build                     # 10% loss in each direction
+#   LOSS=0.20 docker compose up --build           # 20%
+#   LOSS=0 HI=2000000000 docker compose up --build
+#
+# The client prints "Result <hash> <nonce>" and exits; Ctrl-C stops the rest.
+# While it runs: curl localhost:9100/metrics
+
+name: rudp-scheduler
+
+x-node: &node
+  build: .
+  image: rudp-scheduler:local
+
+services:
+  server:
+    <<: *node
+    command:
+      - server
+      - -port=7000
+      - -http=:9100
+      - -drop=${LOSS:-0.10}
+      - -epoch-limit=${EPOCH_LIMIT:-10}
+    ports:
+      - "9100:9100"
+
+  worker:
+    <<: *node
+    command:
+      - worker
+      - -drop=${LOSS:-0.10}
+      - -epoch-limit=${EPOCH_LIMIT:-10}
+      - server:7000
+    depends_on:
+      - server
+    deploy:
+      replicas: 4
+
+  client:
+    <<: *node
+    command:
+      - client
+      - -drop=${LOSS:-0.10}
+      - -epoch-limit=${EPOCH_LIMIT:-10}
+      - server:7000
+      - ${MSG:-hello world}
+      - "${LO:-0}"
+      - "${HI:-500000000}"
+    depends_on:
+      - server
+      - worker
+    restart: on-failure
